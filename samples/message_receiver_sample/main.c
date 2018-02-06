@@ -8,14 +8,16 @@
 #include "azure_c_shared_utility/platform.h"
 #include "azure_c_shared_utility/tlsio.h"
 #include "azure_uamqp_c/uamqp.h"
+#include "azure_uamqp_c/amqp_management.h"
 
 /* This sample connects to an Event Hub, authenticates using SASL PLAIN (key name/key) and then it received all messages for partition 0 */
 /* Replace the below settings with your own.*/
-
 #define EH_HOST "<<<Replace with your own EH host (like myeventhub.servicebus.windows.net)>>>"
 #define EH_KEY_NAME "<<<Replace with your own key name>>>"
 #define EH_KEY "<<<Replace with your own key>>>"
 #define EH_NAME "<<<Insert your event hub name here>>>"
+
+static bool opened = false;
 
 static AMQP_VALUE on_message_received(const void* context, MESSAGE_HANDLE message)
 {
@@ -27,6 +29,27 @@ static AMQP_VALUE on_message_received(const void* context, MESSAGE_HANDLE messag
     return messaging_delivery_accepted();
 }
 
+static void on_amqp_management_open_complete(void* context, AMQP_MANAGEMENT_OPEN_RESULT open_result)
+{
+    (void)context;
+    (void)open_result;
+
+    opened = true;
+}
+
+static void on_amqp_management_error(void* context)
+{
+    (void)context;
+}
+
+static void on_read_operation_complete(void* context, AMQP_MANAGEMENT_EXECUTE_OPERATION_RESULT execute_operation_result, unsigned int status_code, const char* status_description)
+{
+    (void)context;
+    (void)execute_operation_result;
+    (void)status_code;
+    (void)status_description;
+}
+
 int main(int argc, char** argv)
 {
     int result;
@@ -34,8 +57,6 @@ int main(int argc, char** argv)
     XIO_HANDLE sasl_io = NULL;
     CONNECTION_HANDLE connection = NULL;
     SESSION_HANDLE session = NULL;
-    LINK_HANDLE link = NULL;
-    MESSAGE_RECEIVER_HANDLE message_receiver = NULL;
 
     (void)argc;
     (void)argv;
@@ -47,8 +68,6 @@ int main(int argc, char** argv)
     else
     {
         size_t last_memory_used = 0;
-        AMQP_VALUE source;
-        AMQP_VALUE target;
         SASL_PLAIN_CONFIG sasl_plain_config;
         SASL_MECHANISM_HANDLE sasl_mechanism_handle;
         TLSIO_CONFIG tls_io_config;
@@ -81,51 +100,52 @@ int main(int argc, char** argv)
 
         /* create the connection, session and link */
         connection = connection_create(sasl_io, EH_HOST, "whatever", NULL, NULL);
+        connection_set_trace(connection, true);
         session = session_create(connection, NULL, NULL);
 
         /* set incoming window to 100 for the session */
         session_set_incoming_window(session, 100);
 
-        /* listen only on partition 0 */
-        source = messaging_create_source("amqps://" EH_HOST "/" EH_NAME "/ConsumerGroups/$Default/Partitions/0");
-        target = messaging_create_target("ingress-rx");
-        link = link_create(session, "receiver-link", role_receiver, source, target);
-        link_set_rcv_settle_mode(link, receiver_settle_mode_first);
-        amqpvalue_destroy(source);
-        amqpvalue_destroy(target);
+        // create the AMQP management handle
+        AMQP_MANAGEMENT_HANDLE amqp_management = amqp_management_create(session, "$management");
+        amqp_management_open_async(amqp_management, on_amqp_management_open_complete, amqp_management, on_amqp_management_error, amqp_management);
 
-        /* create a message receiver */
-        message_receiver = messagereceiver_create(link, NULL, NULL);
-        if ((message_receiver == NULL) ||
-            (messagereceiver_open(message_receiver, on_message_received, message_receiver) != 0))
+        while (!opened)
         {
-            (void)printf("Cannot open the message receiver.");
-            result = -1;
+            connection_dowork(connection);
         }
-        else
+
+        MESSAGE_HANDLE message = message_create();
+        message_set_body_amqp_value(message, amqpvalue_create_null());
+        AMQP_VALUE properties_map = amqpvalue_create_map();
+        AMQP_VALUE name_key = amqpvalue_create_string("name");
+        AMQP_VALUE name_value = amqpvalue_create_string(EH_NAME);
+        amqpvalue_set_map_value(properties_map, name_key, name_value);
+        //application_properties application_properties = amqpvalue_create_application_properties(properties_map);
+        message_set_application_properties(message, properties_map);
+
+        amqp_management_execute_operation_async(amqp_management, "READ", "com.microsoft:eventhub", NULL, message, on_read_operation_complete, amqp_management);
+
+        bool keep_running = true;
+        while (keep_running)
         {
-            bool keep_running = true;
-            while (keep_running)
+            size_t current_memory_used;
+            size_t maximum_memory_used;
+            connection_dowork(connection);
+
+            current_memory_used = gballoc_getCurrentMemoryUsed();
+            maximum_memory_used = gballoc_getMaximumMemoryUsed();
+
+            if (current_memory_used != last_memory_used)
             {
-                size_t current_memory_used;
-                size_t maximum_memory_used;
-                connection_dowork(connection);
-
-                current_memory_used = gballoc_getCurrentMemoryUsed();
-                maximum_memory_used = gballoc_getMaximumMemoryUsed();
-
-                if (current_memory_used != last_memory_used)
-                {
-                    (void)printf("Current memory usage:%lu (max:%lu)\r\n", (unsigned long)current_memory_used, (unsigned long)maximum_memory_used);
-                    last_memory_used = current_memory_used;
-                }
+                (void)printf("Current memory usage:%lu (max:%lu)\r\n", (unsigned long)current_memory_used, (unsigned long)maximum_memory_used);
+                last_memory_used = current_memory_used;
             }
-
-            result = 0;
         }
 
-        messagereceiver_destroy(message_receiver);
-        link_destroy(link);
+        result = 0;
+
+        amqp_management_destroy(amqp_management);
         session_destroy(session);
         connection_destroy(connection);
         platform_deinit();
