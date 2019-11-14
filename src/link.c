@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "azure_c_shared_utility/gballoc.h"
-#include "azure_c_shared_utility/optimize_size.h"
+#include "azure_macro_utils/macro_utils.h"
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/singlylinkedlist.h"
 #include "azure_c_shared_utility/tickcounter.h"
@@ -28,6 +28,12 @@ typedef struct DELIVERY_INSTANCE_TAG
     tickcounter_ms_t start_tick;
     tickcounter_ms_t timeout;
 } DELIVERY_INSTANCE;
+
+typedef struct ON_LINK_DETACH_EVENT_SUBSCRIPTION_TAG
+{
+    ON_LINK_DETACH_RECEIVED on_link_detach_received;
+    void* context;
+} ON_LINK_DETACH_EVENT_SUBSCRIPTION;
 
 typedef struct LINK_INSTANCE_TAG
 {
@@ -61,6 +67,7 @@ typedef struct LINK_INSTANCE_TAG
     uint32_t received_payload_size;
     delivery_number received_delivery_id;
     TICK_COUNTER_HANDLE tick_counter;
+    ON_LINK_DETACH_EVENT_SUBSCRIPTION on_link_detach_received_event_subscription;
 } LINK_INSTANCE;
 
 DEFINE_ASYNC_OPERATION_CONTEXT(DELIVERY_INSTANCE);
@@ -112,31 +119,31 @@ static int send_flow(LINK_INSTANCE* link)
     if (flow == NULL)
     {
         LogError("NULL flow performative");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         if (flow_set_link_credit(flow, link->current_link_credit) != 0)
         {
             LogError("Cannot set link credit on flow performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if (flow_set_handle(flow, link->handle) != 0)
         {
             LogError("Cannot set handle on flow performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if (flow_set_delivery_count(flow, link->delivery_count) != 0)
         {
             LogError("Cannot set delivery count on flow performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             if (session_send_flow(link->link_endpoint, flow) != 0)
             {
                 LogError("Sending flow frame failed in session send");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -158,31 +165,31 @@ static int send_disposition(LINK_INSTANCE* link_instance, delivery_number delive
     if (disposition == NULL)
     {
         LogError("NULL disposition performative");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
         if (disposition_set_last(disposition, delivery_number) != 0)
         {
             LogError("Failed setting last on disposition performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if (disposition_set_settled(disposition, true) != 0)
         {
             LogError("Failed setting settled on disposition performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if ((delivery_state != NULL) && (disposition_set_state(disposition, delivery_state) != 0))
         {
             LogError("Failed setting state on disposition performative");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             if (session_send_disposition(link_instance->link_endpoint, disposition) != 0)
             {
                 LogError("Sending disposition failed in session send");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -205,7 +212,7 @@ static int send_detach(LINK_INSTANCE* link_instance, bool close, ERROR_HANDLE er
     if (detach_performative == NULL)
     {
         LogError("NULL detach performative");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -213,20 +220,20 @@ static int send_detach(LINK_INSTANCE* link_instance, bool close, ERROR_HANDLE er
             (detach_set_error(detach_performative, error_handle) != 0))
         {
             LogError("Failed setting error on detach frame");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else if (close &&
             (detach_set_closed(detach_performative, true) != 0))
         {
             LogError("Failed setting closed field on detach frame");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
             if (session_send_detach(link_instance->link_endpoint, detach_performative) != 0)
             {
                 LogError("Sending detach frame failed in session send");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -254,7 +261,7 @@ static int send_attach(LINK_INSTANCE* link, const char* name, handle handle, rol
     if (attach == NULL)
     {
         LogError("NULL attach performative");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -277,7 +284,7 @@ static int send_attach(LINK_INSTANCE* link, const char* name, handle handle, rol
             if (attach_set_initial_delivery_count(attach, link->delivery_count) != 0)
             {
                 LogError("Cannot set attach initial delivery count");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
         }
 
@@ -286,12 +293,12 @@ static int send_attach(LINK_INSTANCE* link, const char* name, handle handle, rol
             if (attach_set_max_message_size(attach, link->max_message_size) != 0)
             {
                 LogError("Cannot set max message size");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else if (session_send_attach(link->link_endpoint, attach) != 0)
             {
                 LogError("Sending attach failed in session send");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -437,7 +444,7 @@ static void link_frame_received(void* context, AMQP_VALUE performative, uint32_t
                         is_error = true;
                     }
                 }
-                    
+
                 if (!is_error)
                 {
                     /* If this is a continuation transfer or if this is the first chunk of a multi frame transfer */
@@ -586,6 +593,8 @@ static void link_frame_received(void* context, AMQP_VALUE performative, uint32_t
             bool closed = false;
             ERROR_HANDLE error;
 
+            (void)detach_get_closed(detach, &closed);
+
             /* Received a detach while attached */
             if (link_instance->link_state == LINK_STATE_ATTACHED)
             {
@@ -595,7 +604,6 @@ static void link_frame_received(void* context, AMQP_VALUE performative, uint32_t
                     LogError("Failed sending detach frame");
                 }
             }
-
             /* Received a closing detach after we sent a non-closing detach. */
             else if (closed &&
                 ((link_instance->link_state == LINK_STATE_HALF_ATTACHED_ATTACH_SENT) || (link_instance->link_state == LINK_STATE_HALF_ATTACHED_ATTACH_RECEIVED)) &&
@@ -614,18 +622,24 @@ static void link_frame_received(void* context, AMQP_VALUE performative, uint32_t
                 }
             }
 
-            if (detach_get_error(detach, &error) == 0)
+            if (detach_get_error(detach, &error) != 0)
             {
-                error_destroy(error);
-
-                remove_all_pending_deliveries(link_instance, true);
-                set_link_state(link_instance, LINK_STATE_ERROR);
+                error = NULL;
             }
-            else 
+            remove_all_pending_deliveries(link_instance, true);
+            // signal link detach received in order to handle cases like redirect
+            if (link_instance->on_link_detach_received_event_subscription.on_link_detach_received != NULL)
             {
-                (void)detach_get_closed(detach, &closed);
+                link_instance->on_link_detach_received_event_subscription.on_link_detach_received(link_instance->on_link_detach_received_event_subscription.context, error);
+            }
 
-                remove_all_pending_deliveries(link_instance, true);
+            if (error != NULL)
+            {
+                set_link_state(link_instance, LINK_STATE_ERROR);
+                error_destroy(error);
+            }
+            else
+            {
                 set_link_state(link_instance, LINK_STATE_DETACHED);
             }
 
@@ -714,6 +728,8 @@ LINK_HANDLE link_create(SESSION_HANDLE session, const char* name, role role, AMQ
         result->received_payload = NULL;
         result->received_payload_size = 0;
         result->received_delivery_id = 0;
+        result->on_link_detach_received_event_subscription.on_link_detach_received = NULL;
+        result->on_link_detach_received_event_subscription.context = NULL;
 
         result->tick_counter = tickcounter_create();
         if (result->tick_counter == NULL)
@@ -797,6 +813,8 @@ LINK_HANDLE link_create_from_endpoint(SESSION_HANDLE session, LINK_ENDPOINT_HAND
         result->received_delivery_id = 0;
         result->source = amqpvalue_clone(target);
         result->target = amqpvalue_clone(source);
+        result->on_link_detach_received_event_subscription.on_link_detach_received = NULL;
+        result->on_link_detach_received_event_subscription.context = NULL;
 
         if (role == role_sender)
         {
@@ -862,7 +880,7 @@ void link_destroy(LINK_HANDLE link)
         tickcounter_destroy(link->tick_counter);
 
         link->on_link_state_changed = NULL;
-        (void)link_detach(link, true);
+        (void)link_detach(link, true, NULL, NULL, NULL);
         session_destroy_link_endpoint(link->link_endpoint);
         amqpvalue_destroy(link->source);
         amqpvalue_destroy(link->target);
@@ -893,7 +911,7 @@ int link_set_snd_settle_mode(LINK_HANDLE link, sender_settle_mode snd_settle_mod
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -913,7 +931,7 @@ int link_get_snd_settle_mode(LINK_HANDLE link, sender_settle_mode* snd_settle_mo
     {
         LogError("Bad arguments: link = %p, snd_settle_mode = %p",
             link, snd_settle_mode);
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -932,7 +950,7 @@ int link_set_rcv_settle_mode(LINK_HANDLE link, receiver_settle_mode rcv_settle_m
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -952,7 +970,7 @@ int link_get_rcv_settle_mode(LINK_HANDLE link, receiver_settle_mode* rcv_settle_
     {
         LogError("Bad arguments: link = %p, rcv_settle_mode = %p",
             link, rcv_settle_mode);
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -970,7 +988,7 @@ int link_set_initial_delivery_count(LINK_HANDLE link, sequence_no initial_delive
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -990,7 +1008,7 @@ int link_get_initial_delivery_count(LINK_HANDLE link, sequence_no* initial_deliv
     {
         LogError("Bad arguments: link = %p, initial_delivery_count = %p",
             link, initial_delivery_count);
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1008,7 +1026,7 @@ int link_set_max_message_size(LINK_HANDLE link, uint64_t max_message_size)
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1028,7 +1046,7 @@ int link_get_max_message_size(LINK_HANDLE link, uint64_t* max_message_size)
     {
         LogError("Bad arguments: link = %p, max_message_size = %p",
             link, max_message_size);
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1048,13 +1066,13 @@ int link_get_peer_max_message_size(LINK_HANDLE link, uint64_t* peer_max_message_
     {
         LogError("Bad arguments: link = %p, peer_max_message_size = %p",
             link, peer_max_message_size);
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else if ((link->link_state != LINK_STATE_ATTACHED) &&
         (link->link_state != LINK_STATE_HALF_ATTACHED_ATTACH_RECEIVED))
     {
         LogError("Attempting to read peer max message size before it was received");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1072,7 +1090,7 @@ int link_set_attach_properties(LINK_HANDLE link, fields attach_properties)
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1080,7 +1098,7 @@ int link_set_attach_properties(LINK_HANDLE link, fields attach_properties)
         if (link->attach_properties == NULL)
         {
             LogError("Failed cloning attach properties");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
@@ -1097,7 +1115,7 @@ int link_set_max_link_credit(LINK_HANDLE link, uint32_t max_link_credit)
 
     if (link == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1115,12 +1133,12 @@ int link_attach(LINK_HANDLE link, ON_TRANSFER_RECEIVED on_transfer_received, ON_
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else if (link->is_closed)
     {
         LogError("Already attached");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1134,7 +1152,7 @@ int link_attach(LINK_HANDLE link, ON_TRANSFER_RECEIVED on_transfer_received, ON_
             if (session_begin(link->session) != 0)
             {
                 LogError("Begin session failed");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -1143,7 +1161,7 @@ int link_attach(LINK_HANDLE link, ON_TRANSFER_RECEIVED on_transfer_received, ON_
                 if (session_start_link_endpoint(link->link_endpoint, link_frame_received, on_session_state_changed, on_session_flow_on, link) != 0)
                 {
                     LogError("Binding link endpoint to session failed");
-                    result = __FAILURE__;
+                    result = MU_FAILURE;
                 }
                 else
                 {
@@ -1162,14 +1180,18 @@ int link_attach(LINK_HANDLE link, ON_TRANSFER_RECEIVED on_transfer_received, ON_
     return result;
 }
 
-int link_detach(LINK_HANDLE link, bool close)
+int link_detach(LINK_HANDLE link, bool close, const char* error_condition, const char* error_description, AMQP_VALUE info)
 {
     int result;
+
+    (void)error_condition;
+    (void)error_description;
+    (void)info;
 
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else if (link->is_closed)
     {
@@ -1177,15 +1199,48 @@ int link_detach(LINK_HANDLE link, bool close)
     }
     else
     {
+        ERROR_HANDLE error;
+
+        if (error_condition != NULL)
+        {
+            error = error_create(error_condition);
+            if (error == NULL)
+            {
+                LogInfo("Cannot create error for detach, detaching without error anyhow");
+            }
+            else
+            {
+                if (error_description != NULL)
+                {
+                    if (error_set_description(error, error_description) != 0)
+                    {
+                        LogInfo("Cannot set error description on detach error, detaching anyhow");
+                    }
+                }
+
+                if (info != NULL)
+                {
+                    if (error_set_info(error, info) != 0)
+                    {
+                        LogInfo("Cannot set info map on detach error, detaching anyhow");
+                    }
+                }
+            }
+        }
+        else
+        {
+            error = NULL;
+        }
+
         switch (link->link_state)
         {
         case LINK_STATE_HALF_ATTACHED_ATTACH_SENT:
         case LINK_STATE_HALF_ATTACHED_ATTACH_RECEIVED:
             /* Sending detach when remote is not yet attached */
-            if (send_detach(link, close, NULL) != 0)
+            if (send_detach(link, close, error) != 0)
             {
                 LogError("Sending detach frame failed");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -1196,10 +1251,10 @@ int link_detach(LINK_HANDLE link, bool close)
 
         case LINK_STATE_ATTACHED:
             /* Send detach and wait for remote to respond */
-            if (send_detach(link, close, NULL) != 0)
+            if (send_detach(link, close, error) != 0)
             {
                 LogError("Sending detach frame failed");
-                result = __FAILURE__;
+                result = MU_FAILURE;
             }
             else
             {
@@ -1216,8 +1271,13 @@ int link_detach(LINK_HANDLE link, bool close)
         default:
         case LINK_STATE_ERROR:
             /* Already detached and in error state */
-            result = __FAILURE__;
+            result = MU_FAILURE;
             break;
+        }
+
+        if (error != NULL)
+        {
+            error_destroy(error);
         }
     }
 
@@ -1249,7 +1309,7 @@ static void link_transfer_cancel_handler(ASYNC_OPERATION_HANDLE link_transfer_op
     {
         pending_delivery->on_delivery_settled(pending_delivery->callback_context, pending_delivery->delivery_id, LINK_DELIVERY_SETTLE_REASON_CANCELLED, NULL);
     }
-    
+
     (void)singlylinkedlist_remove_if(((LINK_HANDLE)pending_delivery->link)->pending_deliveries, remove_pending_delivery_condition_function, pending_delivery);
 
     async_operation_destroy(link_transfer_operation);
@@ -1455,7 +1515,7 @@ int link_get_name(LINK_HANDLE link, const char** link_name)
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1473,7 +1533,7 @@ int link_get_received_message_id(LINK_HANDLE link, delivery_number* message_id)
     if (link == NULL)
     {
         LogError("NULL link");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -1498,7 +1558,7 @@ int link_send_disposition(LINK_HANDLE link, delivery_number message_id, AMQP_VAL
         if (result != 0)
         {
             LogError("Cannot send disposition frame");
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
     }
 
@@ -1548,5 +1608,48 @@ void link_dowork(LINK_HANDLE link)
                 item = next_item;
             }
         }
+    }
+}
+
+ON_LINK_DETACH_EVENT_SUBSCRIPTION_HANDLE link_subscribe_on_link_detach_received(LINK_HANDLE link, ON_LINK_DETACH_RECEIVED on_link_detach_received, void* context)
+{
+    ON_LINK_DETACH_EVENT_SUBSCRIPTION_HANDLE result;
+
+    if ((link == NULL) ||
+        (on_link_detach_received == NULL))
+    {
+        LogError("Invalid arguments: link = %p, on_link_detach_received = %p, context = %p",
+            link, on_link_detach_received, context);
+        result = NULL;
+    }
+    else
+    {
+        if (link->on_link_detach_received_event_subscription.on_link_detach_received != NULL)
+        {
+            LogError("Already subscribed for on_link_detach_received events");
+            result = NULL;
+        }
+        else
+        {
+            link->on_link_detach_received_event_subscription.on_link_detach_received = on_link_detach_received;
+            link->on_link_detach_received_event_subscription.context = context;
+
+            result = &link->on_link_detach_received_event_subscription;
+        }
+    }
+
+    return result;
+}
+
+void link_unsubscribe_on_link_detach_received(ON_LINK_DETACH_EVENT_SUBSCRIPTION_HANDLE event_subscription)
+{
+    if (event_subscription == NULL)
+    {
+        LogError("NULL event_subscription");
+    }
+    else
+    {
+        event_subscription->on_link_detach_received = NULL;
+        event_subscription->context = NULL;
     }
 }

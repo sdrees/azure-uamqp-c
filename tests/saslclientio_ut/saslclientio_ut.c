@@ -8,11 +8,17 @@
 #include <stdlib.h>
 #include <stdint.h>
 #endif
+
+#include "azure_macro_utils/macro_utils.h"
 #include "testrunnerswitcher.h"
-#include "umock_c.h"
-#include "umocktypes_stdint.h"
-#include "umocktypes_charptr.h"
-#include "umocktypes_bool.h"
+#include "umock_c/umock_c.h"
+#include "umock_c/umocktypes_stdint.h"
+#include "umock_c/umocktypes_charptr.h"
+#include "umock_c/umocktypes_bool.h"
+
+#if defined _MSC_VER
+#pragma warning(disable: 4054) /* MSC incorrectly fires this */
+#endif
 
 static void* my_gballoc_malloc(size_t size)
 {
@@ -345,9 +351,8 @@ MOCK_FUNCTION_WITH_CODE(, void, test_on_io_close_complete, void*, context)
 MOCK_FUNCTION_END()
 
 static TEST_MUTEX_HANDLE g_testByTest;
-static TEST_MUTEX_HANDLE g_dllByDll;
 
-DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
+MU_DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
 TEST_DEFINE_ENUM_TYPE(IO_OPEN_RESULT, IO_OPEN_RESULT_VALUES);
 IMPLEMENT_UMOCK_C_ENUM_TYPE(IO_OPEN_RESULT, IO_OPEN_RESULT_VALUES);
 TEST_DEFINE_ENUM_TYPE(OPTIONHANDLER_RESULT, OPTIONHANDLER_RESULT_VALUES);
@@ -355,9 +360,7 @@ IMPLEMENT_UMOCK_C_ENUM_TYPE(OPTIONHANDLER_RESULT, OPTIONHANDLER_RESULT_VALUES);
 
 static void on_umock_c_error(UMOCK_C_ERROR_CODE error_code)
 {
-    char temp_str[256];
-    (void)snprintf(temp_str, sizeof(temp_str), "umock_c reported error :%s", ENUM_TO_STRING(UMOCK_C_ERROR_CODE, error_code));
-    ASSERT_FAIL(temp_str);
+    ASSERT_FAIL("umock_c reported error :%" PRI_MU_ENUM "", MU_ENUM_VALUE(UMOCK_C_ERROR_CODE, error_code));
 }
 
 static int umocktypes_copy_amqp_binary(amqp_binary* destination, const amqp_binary* source)
@@ -369,7 +372,7 @@ static int umocktypes_copy_amqp_binary(amqp_binary* destination, const amqp_bina
         destination->bytes = (unsigned char*)my_gballoc_malloc(source->length);
         if (destination->bytes == NULL)
         {
-            result = __FAILURE__;
+            result = MU_FAILURE;
         }
         else
         {
@@ -455,7 +458,7 @@ static int umocktypes_copy_bool_ptr(bool** destination, const bool** source)
     *destination = (bool*)my_gballoc_malloc(sizeof(bool));
     if (*destination == NULL)
     {
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -602,20 +605,19 @@ TEST_SUITE_INITIALIZE(suite_init)
 {
     int result;
 
-    TEST_INITIALIZE_MEMORY_DEBUG(g_dllByDll);
     g_testByTest = TEST_MUTEX_CREATE();
     ASSERT_IS_NOT_NULL(g_testByTest);
 
     umock_c_init(on_umock_c_error);
 
     result = umocktypes_stdint_register_types();
-    ASSERT_ARE_EQUAL_WITH_MSG(int, 0, result, "Failed registering stdint types");
+    ASSERT_ARE_EQUAL(int, 0, result, "Failed registering stdint types");
 
     result = umocktypes_charptr_register_types();
-    ASSERT_ARE_EQUAL_WITH_MSG(int, 0, result, "Failed registering charptr types");
+    ASSERT_ARE_EQUAL(int, 0, result, "Failed registering charptr types");
 
     result = umocktypes_bool_register_types();
-    ASSERT_ARE_EQUAL_WITH_MSG(int, 0, result, "Failed registering bool types");
+    ASSERT_ARE_EQUAL(int, 0, result, "Failed registering bool types");
 
     REGISTER_GLOBAL_MOCK_HOOK(gballoc_malloc, my_gballoc_malloc);
     REGISTER_GLOBAL_MOCK_HOOK(gballoc_free, my_gballoc_free);
@@ -684,7 +686,6 @@ TEST_SUITE_CLEANUP(suite_cleanup)
     umock_c_deinit();
 
     TEST_MUTEX_DESTROY(g_testByTest);
-    TEST_DEINITIALIZE_MEMORY_DEBUG(g_dllByDll);
 }
 
 TEST_FUNCTION_INITIALIZE(method_init)
@@ -2618,7 +2619,7 @@ TEST_FUNCTION(when_a_SASL_mechanism_is_received_a_sasl_init_frame_is_send_with_t
     uint32_t mechanisms_count = 1;
     SASL_MECHANISM_BYTES init_bytes;
     amqp_binary expected_creds;
-    
+
     init_bytes.bytes = test_init_bytes;
     init_bytes.length = sizeof(test_init_bytes);
 

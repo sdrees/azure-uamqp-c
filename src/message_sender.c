@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include "azure_c_shared_utility/optimize_size.h"
+#include <inttypes.h>
+#include "azure_macro_utils/macro_utils.h"
 #include "azure_c_shared_utility/gballoc.h"
 #include "azure_c_shared_utility/xlogging.h"
 #include "azure_c_shared_utility/tickcounter.h"
@@ -119,6 +120,7 @@ static void on_delivery_settled(void* context, delivery_number delivery_no, LINK
             else
             {
                 AMQP_VALUE descriptor = amqpvalue_get_inplace_descriptor(delivery_state);
+                AMQP_VALUE described = amqpvalue_get_inplace_described_value(delivery_state);
 
                 if (descriptor == NULL)
                 {
@@ -126,24 +128,24 @@ static void on_delivery_settled(void* context, delivery_number delivery_no, LINK
                 }
                 else if (is_accepted_type_by_descriptor(descriptor))
                 {
-                    message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_OK);
+                    message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_OK, described);
                 }
                 else
                 {
-                    message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR);
+                    message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR, described);
                 }
             }
 
             break;
         case LINK_DELIVERY_SETTLE_REASON_SETTLED:
-            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_OK);
+            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_OK, NULL);
             break;
         case LINK_DELIVERY_SETTLE_REASON_TIMEOUT:
-            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_TIMEOUT);
+            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_TIMEOUT, NULL);
             break;
         case LINK_DELIVERY_SETTLE_REASON_NOT_DELIVERED:
         default:
-            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR);
+            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR, NULL);
             break;
         }
     }
@@ -162,15 +164,15 @@ static int encode_bytes(void* context, const unsigned char* bytes, size_t length
 static void log_message_chunk(MESSAGE_SENDER_INSTANCE* message_sender, const char* name, AMQP_VALUE value)
 {
 #ifdef NO_LOGGING
-    UNUSED(message_sender);
-    UNUSED(name);
-    UNUSED(value);
+    (void)message_sender;
+    (void)name;
+    (void)value;
 #else
     if (xlogging_get_log_function() != NULL && message_sender->is_trace_on == 1)
     {
         char* value_as_string = NULL;
-        LOG(AZ_LOG_TRACE, 0, "%s", P_OR_NULL(name));
-        LOG(AZ_LOG_TRACE, 0, "%s", P_OR_NULL((value_as_string = amqpvalue_to_string(value))));
+        LOG(AZ_LOG_TRACE, 0, "%s", MU_P_OR_NULL(name));
+        LOG(AZ_LOG_TRACE, 0, "%s", ((value_as_string = amqpvalue_to_string(value)), MU_P_OR_NULL(value_as_string)));
         if (value_as_string != NULL)
         {
             free(value_as_string);
@@ -360,38 +362,46 @@ static SEND_ONE_MESSAGE_RESULT send_one_message(MESSAGE_SENDER_INSTANCE* message
                 }
                 else
                 {
-                    for (i = 0; i < body_data_count; i++)
+                    if (body_data_count == 0)
                     {
-                        if (message_get_body_amqp_data_in_place(message, i, &binary_data) != 0)
+                        LogError("Body data count is zero");
+                        result = SEND_ONE_MESSAGE_ERROR;
+                    }
+                    else
+                    {
+                        for (i = 0; i < body_data_count; i++)
                         {
-                            LogError("Cannot get body AMQP data %u", (unsigned int)i);
-                            result = SEND_ONE_MESSAGE_ERROR;
-                        }
-                        else
-                        {
-                            AMQP_VALUE body_amqp_data;
-                            amqp_binary binary_value;
-                            binary_value.bytes = binary_data.bytes;
-                            binary_value.length = (uint32_t)binary_data.length;
-                            body_amqp_data = amqpvalue_create_data(binary_value);
-                            if (body_amqp_data == NULL)
+                            if (message_get_body_amqp_data_in_place(message, i, &binary_data) != 0)
                             {
-                                LogError("Cannot create body AMQP data");
+                                LogError("Cannot get body AMQP data %u", (unsigned int)i);
                                 result = SEND_ONE_MESSAGE_ERROR;
                             }
                             else
                             {
-                                if (amqpvalue_get_encoded_size(body_amqp_data, &encoded_size) != 0)
+                                AMQP_VALUE body_amqp_data;
+                                amqp_binary binary_value;
+                                binary_value.bytes = binary_data.bytes;
+                                binary_value.length = (uint32_t)binary_data.length;
+                                body_amqp_data = amqpvalue_create_data(binary_value);
+                                if (body_amqp_data == NULL)
                                 {
-                                    LogError("Cannot get body AMQP data encoded size");
+                                    LogError("Cannot create body AMQP data");
                                     result = SEND_ONE_MESSAGE_ERROR;
                                 }
                                 else
                                 {
-                                    total_encoded_size += encoded_size;
-                                }
+                                    if (amqpvalue_get_encoded_size(body_amqp_data, &encoded_size) != 0)
+                                    {
+                                        LogError("Cannot get body AMQP data encoded size");
+                                        result = SEND_ONE_MESSAGE_ERROR;
+                                    }
+                                    else
+                                    {
+                                        total_encoded_size += encoded_size;
+                                    }
 
-                                amqpvalue_destroy(body_amqp_data);
+                                    amqpvalue_destroy(body_amqp_data);
+                                }
                             }
                         }
                     }
@@ -520,7 +530,7 @@ static SEND_ONE_MESSAGE_RESULT send_one_message(MESSAGE_SENDER_INSTANCE* message
                     LINK_TRANSFER_RESULT link_transfer_error;
                     MESSAGE_WITH_CALLBACK* message_with_callback = GET_ASYNC_OPERATION_CONTEXT(MESSAGE_WITH_CALLBACK, pending_send);
                     message_with_callback->message_send_state = MESSAGE_SEND_STATE_PENDING;
-                    
+
                     transfer_async_operation = link_transfer_async(message_sender->link, message_format, &payload, 1, on_delivery_settled, pending_send, &link_transfer_error, message_with_callback->timeout);
                     if (transfer_async_operation == NULL)
                     {
@@ -612,7 +622,7 @@ static void send_all_pending_messages(MESSAGE_SENDER_HANDLE message_sender)
 
                 if (on_message_send_complete != NULL)
                 {
-                    on_message_send_complete(context, MESSAGE_SEND_ERROR);
+                    on_message_send_complete(context, MESSAGE_SEND_ERROR, NULL);
                 }
 
                 i = message_sender->message_count;
@@ -650,7 +660,7 @@ static void indicate_all_messages_as_error(MESSAGE_SENDER_INSTANCE* message_send
         MESSAGE_WITH_CALLBACK* message_with_callback = GET_ASYNC_OPERATION_CONTEXT(MESSAGE_WITH_CALLBACK, message_sender->messages[i]);
         if (message_with_callback->on_message_send_complete != NULL)
         {
-            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR);
+            message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_ERROR, NULL);
         }
 
         if (message_with_callback->message != NULL)
@@ -689,9 +699,9 @@ static void on_link_state_changed(void* context, LINK_STATE new_link_state, LINK
         if ((message_sender->message_sender_state == MESSAGE_SENDER_STATE_OPEN) ||
             (message_sender->message_sender_state == MESSAGE_SENDER_STATE_CLOSING))
         {
-            /* User initiated transition, we should be good */
-            set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_IDLE);
+            /* switch to closing so that no more requests should be accepted */
             indicate_all_messages_as_error(message_sender);
+            set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_IDLE);
         }
         else if (message_sender->message_sender_state != MESSAGE_SENDER_STATE_IDLE)
         {
@@ -702,8 +712,8 @@ static void on_link_state_changed(void* context, LINK_STATE new_link_state, LINK
     case LINK_STATE_ERROR:
         if (message_sender->message_sender_state != MESSAGE_SENDER_STATE_ERROR)
         {
-            set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_ERROR);
             indicate_all_messages_as_error(message_sender);
+            set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_ERROR);
         }
         break;
     }
@@ -745,7 +755,6 @@ void messagesender_destroy(MESSAGE_SENDER_HANDLE message_sender)
     else
     {
         (void)messagesender_close(message_sender);
-        indicate_all_messages_as_error(message_sender);
 
         free(message_sender);
     }
@@ -758,7 +767,7 @@ int messagesender_open(MESSAGE_SENDER_HANDLE message_sender)
     if (message_sender == NULL)
     {
         LogError("NULL message_sender");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
@@ -768,7 +777,7 @@ int messagesender_open(MESSAGE_SENDER_HANDLE message_sender)
             if (link_attach(message_sender->link, NULL, on_link_state_changed, on_link_flow_on, message_sender) != 0)
             {
                 LogError("attach link failed");
-                result = __FAILURE__;
+                result = MU_FAILURE;
                 set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_ERROR);
             }
             else
@@ -792,18 +801,20 @@ int messagesender_close(MESSAGE_SENDER_HANDLE message_sender)
     if (message_sender == NULL)
     {
         LogError("NULL message_sender");
-        result = __FAILURE__;
+        result = MU_FAILURE;
     }
     else
     {
+        indicate_all_messages_as_error(message_sender);
+
         if ((message_sender->message_sender_state == MESSAGE_SENDER_STATE_OPENING) ||
             (message_sender->message_sender_state == MESSAGE_SENDER_STATE_OPEN))
         {
             set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_CLOSING);
-            if (link_detach(message_sender->link, true) != 0)
+            if (link_detach(message_sender->link, true, NULL, NULL, NULL) != 0)
             {
                 LogError("Detaching link failed");
-                result = __FAILURE__;
+                result = MU_FAILURE;
                 set_message_sender_state(message_sender, MESSAGE_SENDER_STATE_ERROR);
             }
             else
@@ -825,7 +836,7 @@ static void messagesender_send_cancel_handler(ASYNC_OPERATION_HANDLE send_operat
     MESSAGE_WITH_CALLBACK* message_with_callback = GET_ASYNC_OPERATION_CONTEXT(MESSAGE_WITH_CALLBACK, send_operation);
     if (message_with_callback->on_message_send_complete != NULL)
     {
-        message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_CANCELLED);
+        message_with_callback->on_message_send_complete(message_with_callback->context, MESSAGE_SEND_CANCELLED, NULL);
     }
 
     remove_pending_message(message_with_callback->message_sender, send_operation);
@@ -838,7 +849,7 @@ ASYNC_OPERATION_HANDLE messagesender_send_async(MESSAGE_SENDER_HANDLE message_se
     if ((message_sender == NULL) ||
         (message == NULL))
     {
-        LogError("Bad parameters: message_sender = %p, message = %p");
+        LogError("Bad parameters: message_sender=%p, message=%p, on_message_send_complete=%p, callback_context=%p, timeout=%" PRIu64, message_sender, message, on_message_send_complete, callback_context, (uint64_t)timeout);
         result = NULL;
     }
     else

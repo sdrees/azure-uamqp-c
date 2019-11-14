@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <stddef.h>
 #endif
+
+#include "azure_macro_utils/macro_utils.h"
 #include "testrunnerswitcher.h"
-#include "umock_c.h"
-#include "umock_c_negative_tests.h"
+#include "umock_c/umock_c.h"
+#include "umock_c/umock_c_negative_tests.h"
 
 // TODO: Add tests for each part of the message where the value is cleared and then read
 
@@ -69,15 +71,12 @@ static const AMQP_VALUE cloned_sequence_2 = (AMQP_VALUE)0x4260;
 static const HEADER_HANDLE another_test_header = (HEADER_HANDLE)0x4261;
 
 static TEST_MUTEX_HANDLE g_testByTest;
-static TEST_MUTEX_HANDLE g_dllByDll;
 
-DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
+MU_DEFINE_ENUM_STRINGS(UMOCK_C_ERROR_CODE, UMOCK_C_ERROR_CODE_VALUES)
 
 static void on_umock_c_error(UMOCK_C_ERROR_CODE error_code)
 {
-    char temp_str[256];
-    (void)snprintf(temp_str, sizeof(temp_str), "umock_c reported error :%s", ENUM_TO_STRING(UMOCK_C_ERROR_CODE, error_code));
-    ASSERT_FAIL(temp_str);
+    ASSERT_FAIL("umock_c reported error :%" PRI_MU_ENUM "", MU_ENUM_VALUE(UMOCK_C_ERROR_CODE, error_code));
 }
 
 static void stringify_bytes(const unsigned char* bytes, size_t byte_count, char* output_string)
@@ -103,7 +102,6 @@ BEGIN_TEST_SUITE(message_ut)
 
 TEST_SUITE_INITIALIZE(suite_init)
 {
-    TEST_INITIALIZE_MEMORY_DEBUG(g_dllByDll);
     g_testByTest = TEST_MUTEX_CREATE();
     ASSERT_IS_NOT_NULL(g_testByTest);
 
@@ -125,7 +123,6 @@ TEST_SUITE_CLEANUP(suite_cleanup)
     umock_c_deinit();
 
     TEST_MUTEX_DESTROY(g_testByTest);
-    TEST_DEINITIALIZE_MEMORY_DEBUG(g_dllByDll);
 }
 
 TEST_FUNCTION_INITIALIZE(test_init)
@@ -179,8 +176,8 @@ TEST_FUNCTION(message_create_2_times_yields_2_different_message_instances)
     message2 = message_create();
 
     // assert
-    ASSERT_IS_NOT_NULL_WITH_MSG(message1, "Creating the first message failed");
-    ASSERT_IS_NOT_NULL_WITH_MSG(message2, "Creating the second message failed");
+    ASSERT_IS_NOT_NULL(message1, "Creating the first message failed");
+    ASSERT_IS_NOT_NULL(message2, "Creating the second message failed");
     ASSERT_ARE_NOT_EQUAL(void_ptr, message1, message2);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
 
@@ -461,7 +458,7 @@ TEST_FUNCTION(when_any_clone_operations_fails_message_clone_for_a_message_with_d
         message = message_clone(source_message);
 
         // assert
-        ASSERT_IS_NULL_WITH_MSG(message, tmp_msg);
+        ASSERT_IS_NULL(message, tmp_msg);
     }
 
     // cleanup
@@ -529,7 +526,7 @@ TEST_FUNCTION(when_any_clone_operations_fails_message_clone_for_a_message_with_v
         message = message_clone(source_message);
 
         // assert
-        ASSERT_IS_NULL_WITH_MSG(message, tmp_msg);
+        ASSERT_IS_NULL(message, tmp_msg);
     }
 
     // cleanup
@@ -598,7 +595,7 @@ TEST_FUNCTION(when_any_clone_operations_fails_message_clone_for_a_message_with_s
         message = message_clone(source_message);
 
         // assert
-        ASSERT_IS_NULL_WITH_MSG(message, tmp_msg);
+        ASSERT_IS_NULL(message, tmp_msg);
     }
 
     // cleanup
@@ -3876,7 +3873,7 @@ TEST_FUNCTION(message_get_body_amqp_sequence_in_place_gets_the_first_item)
     ASSERT_ARE_EQUAL(int, 0, result);
     ASSERT_ARE_EQUAL(void_ptr, cloned_sequence_1, read_sequence);
     ASSERT_ARE_EQUAL(char_ptr, umock_c_get_expected_calls(), umock_c_get_actual_calls());
-    
+
     // cleanup
     message_destroy(message);
 }
